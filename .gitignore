@@ -1,5 +1,5 @@
 # run pdata.py
-./data/examples.pkl.gz
+data/examples.pkl.gz
 
 # Python stuff:
 # Byte-compiled / optimized / DLL files
