@@ -1,3 +1,7 @@
+# run pdata.py
+./data/examples.pkl.gz
+
+# Python stuff:
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
