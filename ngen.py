@@ -34,7 +34,7 @@ def load_data(filename="data/examples.pkl.gz"):
   '''
   Loads pickled gzipped data (see pdata.py).
   '''
-  debug('... loading data')
+  debug("... loading data ...")
 
   # Load the dataset
   with gzip.open(filename, 'rb') as fin:
@@ -243,6 +243,7 @@ class AEStack:
     """
     tfs = self.get_training_functions(corruption_rates, learning_rates)
     indices = list(range(examples.get_value(borrow=True).shape[0]))
+    start_time = timeit.default_timer()
     for i in range(len(self.layers)):
       # TODO: batches?
       for epoch in range(epoch_counts[i]):
@@ -253,8 +254,11 @@ class AEStack:
           if mincost is None or cost < mincost:
             mincost = cost
         debug(
-          "... done with epoch {} at layer {}: min cost is {:0.3f} ...".format(
-            epoch, i, float(mincost)
+          "... [{}] epoch {} at layer {} done: min cost {:0.3f} ...".format(
+            str(datetime.timedelta(seconds=timeit.default_timer()-start_time)),
+            epoch + 1,
+            i,
+            float(mincost)
           )
         )
 
@@ -379,14 +383,14 @@ def build_network(
   window_size=8,
   palette_size=16,
   batch_size = 1, # TODO: Implement this
-  layer_sizes = (1.2,),
-  training_epochs = (5,),# (40,),
-  corruption_rates = (0.4,),
-  learning_rates = (0.05,), # (0.005,)
-  #layer_sizes = (0.75, 0.66),
-  #training_epochs = (20, 20),
-  #corruption_rates = (0.3, 0.3),
-  #learning_rates = (0.01, 0.01) # (0.001, 0.001)
+  #layer_sizes = (0.7,),
+  #training_epochs = (5,),# (40,),
+  #corruption_rates = (0.3,),
+  #learning_rates = (0.05,), # (0.005,)
+  layer_sizes = (0.6, 0.5, 0.4),
+  training_epochs = (10, 10, 10),
+  corruption_rates = (0.3, 0.3, 0.3),
+  learning_rates = (0.03, 0.03, 0.03) # (0.001, 0.001)
 ):
   """
   Builds and trains a network for recognizing image fragments.
@@ -452,7 +456,7 @@ def vis_network(
   net,
   palette,
   window_size=8,
-  show=(8, 8),
+  show=(12, 12),
   outdir="out",
   outfile="vis.png"
 ):
@@ -482,6 +486,8 @@ def vis_network(
   for i in range(show[0]*show[1]):
     fake = numpy.zeros(encoded.shape, dtype=theano.config.floatX)
     fake = fake.reshape(-1)
+    if i >= fake.shape[0]:
+      continue
     fake[i] = 1
     fake = fake.reshape(encoded.shape)
     exemplars.append(
@@ -498,10 +504,11 @@ def vis_network(
   i = 0
   for x in range(show[0]):
     for y in range(show[1]):
-      result[
-        x*(window_size+1):(x+1)*(window_size+1) - 1,
-        y*(window_size+1):(y+1)*(window_size+1) - 1
-      ] = exemplars[i]
+      if i < len(exemplars):
+        result[
+          x*(window_size+1):(x+1)*(window_size+1) - 1,
+          y*(window_size+1):(y+1)*(window_size+1) - 1
+        ] = exemplars[i]
       i += 1
 
   fp = copy.deepcopy(palette)

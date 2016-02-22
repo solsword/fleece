@@ -26,6 +26,7 @@ def process_data(
   directory="data",
   result_file="examples.pkl.gz",
   window_size=8,
+  step=4,
   drop_empty=None,
   palette={},
   r_palette={}
@@ -52,8 +53,8 @@ def process_data(
   # Iterate through subregions of the image using two grids offset by 1/2
   # window_size, turning each region into a training example:
   for img in all_images:
-    for x in range(0, img.size[0] - int(window_size/2), int(window_size/2)):
-      for y in range(0, img.size[1] - int(window_size/2), int(window_size/2)):
+    for x in range(0, img.size[0] - window_size + 1, step):
+      for y in range(0, img.size[1] - window_size + 1, step):
         example = []
         data = img.crop((x, y, x+window_size, y+window_size)).getdata()
         non_empty = False
@@ -64,8 +65,8 @@ def process_data(
         if drop_empty is None or non_empty:
           dataset.append(example)
 
-  x = len(list(range(0, img.size[0] - int(window_size/2), int(window_size/2))))
-  y = len(list(range(0, img.size[1] - int(window_size/2), int(window_size/2))))
+  x = len(list(range(0, img.size[0] - window_size + 1, step)))
+  y = len(list(range(0, img.size[1] - window_size + 1, step)))
   print("... generated {}/{} examples ...".format(len(dataset), x*y))
 
   dataset = numpy.array(dataset, dtype=float)
@@ -84,5 +85,5 @@ def process_data(
     )
 
 if __name__ == "__main__":
-  process_data(window_size=8, drop_empty=(0xff, 0xff, 0xff))
+  process_data(window_size=8, step=1, drop_empty=(0xff, 0xff, 0xff))
   #process_data(window_size=8, drop_empty = None)
