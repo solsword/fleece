@@ -38,7 +38,7 @@ def load_data(filename="data/examples.pkl.gz"):
 
   # Load the dataset
   with gzip.open(filename, 'rb') as fin:
-      dataset = pickle.load(fin)
+    dataset = pickle.load(fin)
 
   # format: a dictionary with three keys:
   #  "examples": a numpy.ndarray with 2 dimensions where each row is an
@@ -521,6 +521,92 @@ def vis_network(
     outfile
   )
 
+def build_munge(examples, net, nbest=3):
+  # Express our inputs in terms of the last layer of our neural net, and get
+  # the values using the net in its current state:
+  n_ex = examples.shape[0]
+  exreps, _ = theano.scan(
+    fn=lambda i: net.get_deconstruct(examples[i].reshape([-1])),
+    sequences=[T.arange(n_ex)]
+  )
+  exf = theano.function([], exreps)
+  exconst = T.constant(exf())
+
+  # An input variable:
+  input = T.tensor3(name="input", dtype=theano.config.floatX)
+
+  # Build an expression for computing the net's deconstruction of a variable
+  # input, and putting it into a column shape:
+  irepcol = net.get_deconstruct(input.reshape([-1])).reshape([-1, 1])
+
+  # An expression for getting the dot products between our representations of
+  # each example and our representation of the input:
+  dot_products = T.dot(exconst, irepcol)
+
+  # The "best" examples are the ones which are most similar to the encoding of
+  # the input:
+  whichbest = T.argsort(dot_products)[-nbest:].reshape([nbest])
+  best = exconst[whichbest,:]
+  bestweights = dot_products[whichbest].reshape([nbest])
+
+  # Normalize the nbest entries and combine them:
+  norm = bestweights / T.sum(bestweights)
+  combined = T.dot(norm, best)
+
+  rec = net.get_reconstruct(combined).reshape(input.shape)
+
+  munge = theano.function(name="munge", inputs=[input], outputs=rec)
+
+  # TODO: Get rid of this?
+  #munge = theano.function(
+  #  inputs=[input],
+  #  outputs=net.get_reconstruct(
+  #    net.get_deconstruct(input.reshape(-1))
+  #  ).reshape(input.shape)
+  #)
+
+  return munge
+  
+
+def get_net(data=None, outdir="data", outfile="network.pkl.gz", rebuild=False):
+  fn = os.path.join(outdir, outfile)
+  if not data:
+    # Load data:
+    data = load_data("data/examples.pkl.gz")
+
+  ws = data["window_size"]
+  hws = int(ws/2)
+  ps = len(data["palette"])
+  r_palette = data["r_palette"]
+
+  if rebuild or not os.path.exists(fn):
+    debug("... building network from scratch ...")
+    # Build network:
+    net = build_network(
+      data["examples"],
+      window_size = ws,
+      palette_size = ps
+    )
+
+    debug("... pickling trained network ...")
+    with gzip.open(fn, 'wb') as fout:
+      pickle.dump(net, fout)
+
+    debug("... visualizing trained network ...")
+    vis_network(
+      net,
+      r_palette,
+      window_size=ws,
+      outdir=outdir
+    )
+  else:
+    debug("... loading pickled network ...")
+    with gzip.open(fn, 'rb') as fin:
+      net = pickle.load(fin)
+
+  return net
+
+
 def generate_image(
   outdir="out",
   outfile = "result.lvl.png",
@@ -535,19 +621,7 @@ def generate_image(
   ps = len(data["palette"])
   r_palette = data["r_palette"]
 
-  net = build_network(
-    data["examples"],
-    window_size = ws,
-    palette_size = ps
-  )
-
-  debug("... visualizing trained network ...")
-  vis_network(
-    net,
-    r_palette,
-    window_size=ws,
-    outdir=outdir
-  )
+  net = get_net(data=data, rebuild=False)
 
   # TODO: More realistic frequency distribution here?
   result = numpy.random.random_integers(
@@ -568,14 +642,8 @@ def generate_image(
   #  for y in range(0, size[1] - ws+1, ws):
   #    indices.append((x, y))
 
-  input = T.vector(name="input", dtype=theano.config.floatX)
-
   debug("... starting image generation ...")
-  # TODO: Better here...
-  munge = theano.function(
-    inputs=[input],
-    outputs=net.get_reconstruct(net.get_deconstruct(input))
-  )
+  munge = build_munge(data["examples"], net)
 
   for epoch in range(cycles):
     numpy.random.shuffle(indices)
@@ -593,9 +661,7 @@ def generate_image(
           "patched.lvl.png"
         )
 
-      result[x:x+ws,y:y+ws,:] = munge(
-        result[x:x+ws,y:y+ws,:].reshape(-1)
-      ).reshape((ws, ws, ps))
+      result[x:x+ws,y:y+ws,:] = munge(result[x:x+ws,y:y+ws,:])
 
     debug("... generation cycle {}/{} completed ...".format(epoch + 1, cycles))
 

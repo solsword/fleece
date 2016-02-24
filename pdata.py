@@ -80,8 +80,7 @@ def process_data(
         "palette":palette,
         "r_palette":r_palette
       },
-      fout,
-      protocol=pickle.DEFAULT_PROTOCOL
+      fout
     )
 
 if __name__ == "__main__":

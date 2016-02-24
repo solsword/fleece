@@ -1,5 +1,7 @@
 # run pdata.py
 data/examples.pkl.gz
+data/network.pkl.gz
+data/vis.png
 
 # Python stuff:
 # Byte-compiled / optimized / DLL files
