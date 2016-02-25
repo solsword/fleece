@@ -1,7 +1,8 @@
-# run pdata.py
+# run pdata.py and/or ngen.py
 data/examples.pkl.gz
 data/network.pkl.gz
 data/vis.png
+out/
 
 # Python stuff:
 # Byte-compiled / optimized / DLL files

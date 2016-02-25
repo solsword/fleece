@@ -20,6 +20,8 @@ import gzip
 import numpy
 import random
 
+import theano
+
 from PIL import Image
 
 def process_data(
@@ -50,18 +52,23 @@ def process_data(
         r_palette[index] = color
         index += 1
 
-  # Iterate through subregions of the image using two grids offset by 1/2
-  # window_size, turning each region into a training example:
+  # Iterate through all possible subregions of each image, turning each region
+  # into a training example:
   for img in all_images:
     for x in range(0, img.size[0] - window_size + 1, step):
       for y in range(0, img.size[1] - window_size + 1, step):
-        example = []
-        data = img.crop((x, y, x+window_size, y+window_size)).getdata()
+        example = numpy.zeros(
+          shape=(window_size, window_size),
+          dtype=theano.config.floatX
+        )
+        pixels = img.crop((x, y, x+window_size, y+window_size)).load()
         non_empty = False
-        for px in data:
-          if px != drop_empty:
-            non_empty = True
-          example.append(palette[px])
+        for ix in range(window_size):
+          for iy in range(window_size):
+            px = pixels[ix, iy]
+            if px != drop_empty:
+              non_empty = True
+            example[ix, iy] = palette[px]
         if drop_empty is None or non_empty:
           dataset.append(example)
 
@@ -69,7 +76,7 @@ def process_data(
   y = len(list(range(0, img.size[1] - window_size + 1, step)))
   print("... generated {}/{} examples ...".format(len(dataset), x*y))
 
-  dataset = numpy.array(dataset, dtype=float)
+  dataset = numpy.array(dataset)
 
   # Pickle and gzip the dataset:
   with gzip.open(os.path.join(directory, result_file), 'wb') as fout:
@@ -85,4 +92,4 @@ def process_data(
 
 if __name__ == "__main__":
   process_data(window_size=8, step=1, drop_empty=(0xff, 0xff, 0xff))
-  #process_data(window_size=8, drop_empty = None)
+  #process_data(window_size=8, step=1, drop_empty = None)

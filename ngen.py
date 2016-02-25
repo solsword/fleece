@@ -310,53 +310,6 @@ def implode_result(data):
     result[tuple(coords)] = numpy.argmax(enc)
   return result
 
-def build_examples(
-  directory="data",
-  window_size=8,
-  palette={},
-  r_palette={}
-):
-  all_images = []
-  dataset = []
-
-  # Collect all *.lvl.png images:
-  for dpath, dnames, fnames in os.walk(directory):
-    for f in fnames:
-      if f.endswith(".lvl.png"):
-        all_images.append(Image.open(os.path.join(dpath, f)))
-
-  # For each image, iterate over pixels to build our combined palette:
-  index = 0
-  for img in all_images:
-    for (count, color) in img.getcolors(img.size[0]*img.size[1]):
-      if color not in palette:
-        palette[color] = index
-        r_palette[index] = color
-        index += 1
-
-  # Iterate through subregions of the image using two grids offset by 1/2
-  # window_size, turning each region into a training example:
-  for img in all_images:
-    for x in range(0, img.size[0] - int(window_size/2), int(window_size/2)):
-      for y in range(0, img.size[1] - int(window_size/2), int(window_size/2)):
-        example = []
-        data = img.crop((x, y, x+window_size, y+window_size)).getdata()
-        for px in data:
-          example.append(palette[px])
-        dataset.append(example)
-
-  # Iterate over each example, exploding it into a W x W x P one-hot encoding
-  # where W is the window size and P is the palette size.
-  dataset = numpy.array(
-    [explode_example(ex, len(palette)) for ex in dataset],
-    dtype=theano.config.floatX
-  )
-
-  return theano.shared(
-    value=dataset,
-    name="examples"
-  )
-
 def fake_palette(size):
   result = {}
   fp = [
@@ -384,13 +337,17 @@ def build_network(
   palette_size=16,
   batch_size = 1, # TODO: Implement this
   #layer_sizes = (0.7,),
-  #training_epochs = (5,),# (40,),
+  #training_epochs = (10,),# (30,),
   #corruption_rates = (0.3,),
   #learning_rates = (0.05,), # (0.005,)
-  layer_sizes = (0.6, 0.5, 0.4),
-  training_epochs = (10, 10, 10),
-  corruption_rates = (0.3, 0.3, 0.3),
-  learning_rates = (0.03, 0.03, 0.03) # (0.001, 0.001)
+  #layer_sizes = (0.8,0.5),
+  #training_epochs = (10,10),
+  #corruption_rates = (0.6,0.6),
+  #learning_rates = (0.05,0.05),
+  layer_sizes = (0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1),
+  training_epochs = (14, 14, 14, 14, 14, 14, 14, 14, 14),
+  corruption_rates = (0.4, 0.3, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2),
+  learning_rates = (0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03)
 ):
   """
   Builds and trains a network for recognizing image fragments.
@@ -449,6 +406,34 @@ def write_image(data, palette, outdir, outfile):
         pixels[x, y] = palette[idx]
       else:
         pixels[x, y] = (255, 0, 255)
+
+  img.save(os.path.join(outdir, outfile))
+
+def write_grayscale(data, outdir, outfile, nbest=50):
+  rs = data.reshape(-1)
+  sqside = int((len(rs)**0.5) + 0.99999)
+  shape = (sqside, sqside)
+
+  normed = data / numpy.max(data)
+  best = numpy.argsort(normed, axis=None)[-nbest:]
+
+  img = Image.new("RGBA", shape)
+  pixels = img.load()
+
+  i = 0
+  for x in range(sqside):
+    for y in range(sqside):
+      if i < len(normed):
+        g = int(normed[i] * 256)
+        r = g
+        a = 255
+        if i in best:
+          r = 0
+      else:
+        g = 0
+        a = 0
+      i += 1
+      pixels[x, y] = (r, g, g, a)
 
   img.save(os.path.join(outdir, outfile))
 
@@ -521,7 +506,7 @@ def vis_network(
     outfile
   )
 
-def build_munge(examples, net, nbest=3):
+def build_munge(examples, net, nbest=2):
   # Express our inputs in terms of the last layer of our neural net, and get
   # the values using the net in its current state:
   n_ex = examples.shape[0]
@@ -545,7 +530,7 @@ def build_munge(examples, net, nbest=3):
 
   # The "best" examples are the ones which are most similar to the encoding of
   # the input:
-  whichbest = T.argsort(dot_products)[-nbest:].reshape([nbest])
+  whichbest = T.argsort(dot_products, axis=None)[-nbest:].reshape([nbest])
   best = exconst[whichbest,:]
   bestweights = dot_products[whichbest].reshape([nbest])
 
@@ -555,7 +540,11 @@ def build_munge(examples, net, nbest=3):
 
   rec = net.get_reconstruct(combined).reshape(input.shape)
 
-  munge = theano.function(name="munge", inputs=[input], outputs=rec)
+  munge = theano.function(
+    name="munge",
+    inputs=[input],
+    outputs=[dot_products, rec]
+  )
 
   # TODO: Get rid of this?
   #munge = theano.function(
@@ -572,7 +561,7 @@ def get_net(data=None, outdir="data", outfile="network.pkl.gz", rebuild=False):
   fn = os.path.join(outdir, outfile)
   if not data:
     # Load data:
-    data = load_data("data/examples.pkl.gz")
+    data = load_data()
 
   ws = data["window_size"]
   hws = int(ws/2)
@@ -611,10 +600,11 @@ def generate_image(
   outdir="out",
   outfile = "result.lvl.png",
   size=(128,64),
-  cycles=1
+  cycles=1,
+  show_best_examples=False
 ):
   # Load data:
-  data = load_data("data/examples.pkl.gz")
+  data = load_data()
 
   ws = data["window_size"]
   hws = int(ws/2)
@@ -661,7 +651,15 @@ def generate_image(
           "patched.lvl.png"
         )
 
-      result[x:x+ws,y:y+ws,:] = munge(result[x:x+ws,y:y+ws,:])
+      dots, result[x:x+ws,y:y+ws,:] = munge(result[x:x+ws,y:y+ws,:])
+      #dots, _ = munge(result[x:x+ws,y:y+ws,:])
+      #result[x:x+ws,y:y+ws,:] = result[x:x+ws,y:y+ws,:].reshape(-1).reshape((8, 8, 15))
+      if epoch == 0 and show_best_examples:
+        write_grayscale(
+          dots,
+          outdir=outdir,
+          outfile="dots-{}-{}.png".format(x, y)
+        )
 
     debug("... generation cycle {}/{} completed ...".format(epoch + 1, cycles))
 
@@ -670,5 +668,39 @@ def generate_image(
   write_image(result, r_palette, outdir, outfile)
   debug("... done.")
 
+def test_explode(filename="data/examples.pkl.gz"):
+  # Load the dataset
+  with gzip.open(filename, 'rb') as fin:
+    dataset = pickle.load(fin)
+
+  ex = dataset["examples"][0]
+  print(ex)
+  exr = ex.reshape(8, 8)
+  print(exr)
+  expl = explode_example(exr, len(dataset["palette"]))
+  print(expl)
+  impl = implode_result(expl)
+  print(impl)
+
+  expl2 = explode_example(ex, len(dataset["palette"]))
+  impl2 = implode_result(expl2.reshape((8, 8, 15)))
+  print(impl2)
+  print(impl2[7, 4], impl2[7, 5])
+
+  img = Image.new("RGB", (8, 8))
+  pixels = img.load()
+
+  i = 0
+  for x in range(impl2.shape[0]):
+    for y in range(impl2.shape[1]):
+      g = int(3*impl2[x, y])
+      pixels[x, y] = (g, g, g)
+      i += 1
+      print(impl2[x, y], end=" ")
+    print()
+
+  img.save("t.png")
+
 if __name__ == "__main__":
+  #test_explode()
   generate_image()
