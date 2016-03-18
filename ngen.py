@@ -58,7 +58,7 @@ def load_data(filename="data/examples.pkl.gz"):
 
   return dataset
 
-class AutoEncoder:
+class NeuroLayer:
   """
   A layer of neurons whose weights can be used for both interpretation and
   reconstruction. It also has functions for training to denoise on a given
@@ -181,19 +181,21 @@ class AutoEncoder:
 
       return (cost, updates)
 
-class AEStack:
+class NeuralNet:
   """
   A stack of auto-encoders.
   """
-  def __init__(self, numpy_rng, input_size, layer_sizes):
+  def __init__(self, numpy_rng, input_size, layer_sizes, output_size):
     self.rng = numpy_rng
     self.input_size = input_size
+    self.output_size = output_size
     self.layers = []
     i_size = input_size
     for i in range(len(layer_sizes)):
       o_size = layer_sizes[i]
-      self.layers.append(AutoEncoder(numpy_rng, i_size, o_size))
+      self.layers.append(NeuroLayer(numpy_rng, i_size, o_size))
       i_size = o_size
+    self.layers.append(NeuroLayer(numpy_rng, i_size, output_size))
 
   def get_deconstruct(self, input, limit=-1):
     result = input
@@ -234,6 +236,15 @@ class AEStack:
         )
       )
     return functions
+
+  def get_specialization_function(self, learning_rates):
+    """
+    Returns a theano shared input variable and function that use an example to
+    specialize the network by training it to predict the output_size central
+    values of the input region.
+    """
+    training_input = T.vector(name="training_input", dtype=theano.config.floatX)
+    # TODO: HERE
 
   def train(self, examples, epoch_counts, corruption_rates, learning_rates):
     """
@@ -336,18 +347,18 @@ def build_network(
   window_size=8,
   palette_size=16,
   batch_size = 1, # TODO: Implement this
-  #layer_sizes = (0.7,),
-  #training_epochs = (10,),# (30,),
-  #corruption_rates = (0.3,),
-  #learning_rates = (0.05,), # (0.005,)
+  layer_sizes = (0.7,),
+  training_epochs = (5,),# (30,),
+  corruption_rates = (0.3,),
+  learning_rates = (0.05,), # (0.005,)
   #layer_sizes = (0.8,0.5),
   #training_epochs = (10,10),
-  #corruption_rates = (0.6,0.6),
+  #corruption_rates = (0.3,0.3),
   #learning_rates = (0.05,0.05),
-  layer_sizes = (0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1),
-  training_epochs = (14, 14, 14, 14, 14, 14, 14, 14, 14),
-  corruption_rates = (0.4, 0.3, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2),
-  learning_rates = (0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03)
+  #layer_sizes = (0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1),
+  #training_epochs = (14, 14, 14, 14, 14, 14, 14, 14, 14),
+  #corruption_rates = (0.4, 0.3, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2),
+  #learning_rates = (0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03)
 ):
   """
   Builds and trains a network for recognizing image fragments.
@@ -362,7 +373,7 @@ def build_network(
 
   # Set up the stacked denoising autoencoders:
   numpy_rng = numpy.random.RandomState(465746)
-  net = AEStack(
+  net = NeuralNet(
     numpy_rng=numpy_rng,
     input_size = input_size,
     layer_sizes = hidden_sizes
