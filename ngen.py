@@ -77,7 +77,7 @@ class NeuroLayer:
     # Weights and offsets for deconstruction (input -> output):
     wsx = int(numpy_rng.uniform(low=0, high=input_size))
     wsy = int(numpy_rng.uniform(low=0, high=output_size))
-    self.de_weights = theano.shared(
+    self.weights = theano.shared(
       value=numpy.asarray(
         numpy_rng.uniform(
           low=-4 * numpy.sqrt(6. / (input_size + output_size)),
@@ -86,7 +86,7 @@ class NeuroLayer:
         )[wsx:wsx+input_size,wsy:wsy+output_size],
         dtype=theano.config.floatX
       ),
-      name='de_weights',
+      name='weights',
       borrow=True
     )
 
@@ -99,22 +99,8 @@ class NeuroLayer:
       borrow=True
     )
 
-    # Weights and offsets for reconstruction (output -> input):
-    wsx = int(numpy_rng.uniform(low=0, high=output_size))
-    wsy = int(numpy_rng.uniform(low=0, high=input_size))
-    self.re_weights = theano.shared(
-      value=numpy.asarray(
-        numpy_rng.uniform(
-          low=-4 * numpy.sqrt(6. / (input_size + output_size)),
-          high=4 * numpy.sqrt(6. / (input_size + output_size)),
-          size=(output_size*2, input_size*2)
-        )[wsx:wsx+output_size,wsy:wsy+input_size],
-        dtype=theano.config.floatX
-      ),
-      name='re_weights',
-      borrow=True
-    )
-
+    # Offsets for reconstruction (output -> input):
+    # Note that the weights are shared for both directions.
     self.re_offsets = theano.shared(
       value=numpy.zeros(
         input_size,
@@ -125,21 +111,20 @@ class NeuroLayer:
     )
 
     self.params = [
-      self.de_weights,
+      self.weights,
       self.de_offsets,
-      self.re_weights,
       self.re_offsets
     ]
 
   # Evaluation functions:
   def get_deconstruct(self, input):
     return T.nnet.sigmoid(
-      T.dot(input, self.de_weights) + self.de_offsets
+      T.dot(input, self.weights) + self.de_offsets
     )
 
   def get_reconstruct(self, output):
     return T.nnet.sigmoid(
-      T.dot(output, self.re_weights) + self.re_offsets
+      T.dot(output, self.weights.T) + self.re_offsets
     )
 
   # Training functions:
@@ -213,7 +198,7 @@ class NeuralNet:
       result = self.layers[i].get_reconstruct(result)
     return result
 
-  def get_training_functions(self, corruption_rates, learning_rates):
+  def get_training_functions(self, corruption_rates, ae_learning_rates):
     """
     Returns a theano shared variable for use as input and a list of functions
     for training each layer of the stack.
@@ -225,7 +210,7 @@ class NeuralNet:
       cost_function, updates = self.layers[i].get_cost_and_updates(
         inp,
         corruption_rates[i],
-        learning_rates[i]
+        ae_learning_rates[i]
       )
       functions.append(
         theano.function(
@@ -237,20 +222,44 @@ class NeuralNet:
       )
     return functions
 
-  def get_specialization_function(self, learning_rates):
+  def get_specialization_function(self, input, cv_extract, learning_rate):
     """
-    Returns a theano shared input variable and function that use an example to
-    specialize the network by training it to predict the output_size central
-    values of the input region.
+    Returns a theano function that uses an example to specialize the network by
+    training it to predict the region of the input selected by the given
+    cv_extract function.
     """
-    training_input = T.vector(name="training_input", dtype=theano.config.floatX)
-    # TODO: HERE
+    pfunc = self.get_deconstruct(input)
 
-  def train(self, examples, epoch_counts, corruption_rates, learning_rates):
+    compare_to = cv_extract(input)
+
+    cost = T.sum((compare_to - pfunc) ** 2)
+
+    params = []
+    for l in self.layers:
+      params.extend(l.params[:-1]) # ignore the reconstruction offsets
+
+    gradients = T.grad(cost, params)
+
+    # generate the list of updates
+    updates = [
+        (param, param - learning_rate * gr)
+        for param, gr in zip(params, gradients)
+    ]
+    # TODO: are these really unnecessary here?
+    # + [l.theano_rng.updates() for l in self.layers]
+
+    return theano.function(
+      inputs = [input],
+      outputs = cost,
+      updates = updates,
+      name = "specialization_function"
+    )
+
+  def pretrain(self, examples, epoch_counts, corruption_rates, learning_rates):
     """
-    Trains the stack on the given examples, given lists of epoch counts,
-    corruption rates, and learning rates each equal in length to the number of
-    layers in the stack.
+    Trains the network for autoencoding on the given examples, given lists of
+    epoch counts, corruption rates, and learning rates each equal in length to
+    the number of layers in the stack.
     """
     tfs = self.get_training_functions(corruption_rates, learning_rates)
     indices = list(range(examples.get_value(borrow=True).shape[0]))
@@ -259,19 +268,60 @@ class NeuralNet:
       # TODO: batches?
       for epoch in range(epoch_counts[i]):
         self.rng.shuffle(indices)
-        mincost = None
+        costs = []
         for j in indices:
           cost = tfs[i](examples.get_value(borrow=True)[j].reshape(-1))
-          if mincost is None or cost < mincost:
-            mincost = cost
+          costs.append(cost)
         debug(
-          "... [{}] epoch {} at layer {} done: min cost {:0.3f} ...".format(
+          "... [{}] epoch {: 3d} at layer {: 2d} done {} ...".format(
             str(datetime.timedelta(seconds=timeit.default_timer()-start_time)),
             epoch + 1,
             i,
-            float(mincost)
+            "(min/avg cost {:0.3f}/{:0.3f})".format(
+              float(min(costs)),
+              float(sum(costs)/float(len(costs))),
+            )
           )
         )
+
+  def train(self, examples, cv_extract, epochs, learning_rate):
+    """
+    Specializes the network for prediction on the given examples, using the
+    given center extract function, the given number of epochs, and the given
+    learning rate.
+    """
+    input = T.vector(name="training_input", dtype=theano.config.floatX)
+    tf = self.get_specialization_function(input, cv_extract, learning_rate)
+    indices = list(range(examples.get_value(borrow=True).shape[0]))
+    start_time = timeit.default_timer()
+    # TODO: batches?
+    for epoch in range(epochs):
+      self.rng.shuffle(indices)
+      costs = []
+      for j in indices:
+        cost = tf(examples.get_value(borrow=True)[j].reshape(-1))
+        costs.append(cost)
+      debug(
+        "... [{}] epoch {: 3d} done {} ...".format(
+          str(datetime.timedelta(seconds=timeit.default_timer()-start_time)),
+          epoch + 1,
+          "(min/avg cost {:0.3f}/{:0.3f})".format(
+            float(float(min(costs))),
+            float(float(sum(costs)/float(len(costs))))
+          )
+        )
+      )
+
+def get_central_values(flat_input, input_size, center_size, palette_size):
+  """
+  Takes a flat array which is assumed to represent input_size by input_size by
+  palette_size data, and returns a flat array that represents the center_size
+  by center_size central values of the original array.
+  """
+  lc = input_size//2 - center_size//2
+  rs = flat_input.reshape((input_size, input_size, palette_size))
+  sel = rs[lc:lc+center_size, lc:lc+center_size, :]
+  return sel.reshape([-1])
 
 def explode_example(data, n_layers):
   """
@@ -345,20 +395,35 @@ def fake_palette(size):
 def build_network(
   examples,
   window_size=8,
+  predict_size=2,
   palette_size=16,
   batch_size = 1, # TODO: Implement this
-  layer_sizes = (0.7,),
-  training_epochs = (5,),# (30,),
-  corruption_rates = (0.3,),
-  learning_rates = (0.05,), # (0.005,)
+  #layer_sizes = (0.2,),
+  #ae_epochs = (1,1,),# (30,),
+  #corruption_rates = (0.3,0.3,),
+  #ae_learning_rates = (0.05,0.05,), # (0.005,)
+  #sp_epochs = 1,
+  #sp_learning_rate = 0.05,
+  #layer_sizes = (0.7,),
+  #ae_epochs = (5,5,),# (30,),
+  #corruption_rates = (0.3,0.3,),
+  #ae_learning_rates = (0.05,0.05,), # (0.005,)
+  #sp_epochs = 5,
+  #sp_learning_rate = 0.05,
   #layer_sizes = (0.8,0.5),
-  #training_epochs = (10,10),
-  #corruption_rates = (0.3,0.3),
-  #learning_rates = (0.05,0.05),
-  #layer_sizes = (0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1),
-  #training_epochs = (14, 14, 14, 14, 14, 14, 14, 14, 14),
-  #corruption_rates = (0.4, 0.3, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2),
-  #learning_rates = (0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03)
+  #ae_epochs = (12, 12, 12),
+  #corruption_rates = (0.3, 0.3, 0.2),
+  #ae_learning_rates = (0.05, 0.05, 0.05),
+  #sp_epochs = 20,
+  #sp_learning_rate = 0.05,
+  layer_sizes = (0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1),
+  ae_epochs = (14, 14, 14, 14, 14, 14, 14, 14, 14, 14),
+  corruption_rates = (0.4, 0.3, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2),
+  ae_learning_rates = (
+    0.04, 0.04, 0.04, 0.04, 0.04, 0.04, 0.04, 0.04, 0.04, 0.04
+  ),
+  sp_epochs = 20,
+  sp_learning_rate = 0.05,
 ):
   """
   Builds and trains a network for recognizing image fragments.
@@ -366,6 +431,7 @@ def build_network(
   # Calculate input and layer sizes:
   input_size = window_size * window_size * palette_size
   hidden_sizes = [int(input_size * ls) for ls in layer_sizes]
+  final_size = predict_size * predict_size * palette_size
 
   # Calculate the number of training batches:
   n_train_batches = examples.get_value(borrow=True).shape[0]
@@ -376,7 +442,8 @@ def build_network(
   net = NeuralNet(
     numpy_rng=numpy_rng,
     input_size = input_size,
-    layer_sizes = hidden_sizes
+    layer_sizes = hidden_sizes,
+    output_size = final_size
   )
 
   # Visualize the network pre-training:
@@ -388,17 +455,33 @@ def build_network(
   )
 
   # Train the network for autoencoding:
-  debug("... training the network ...")
+  debug("... pretraining the network ...")
   start_time = timeit.default_timer()
-  net.train(
+  net.pretrain(
     examples,
-    training_epochs,
+    ae_epochs,
     corruption_rates,
-    learning_rates
+    ae_learning_rates
   )
   end_time = timeit.default_timer()
   debug(
-    "... training finished in {} ...".format(
+    "... pretraining finished in {} ...".format(
+      str(datetime.timedelta(seconds=end_time - start_time))
+    )
+  )
+
+  # Specialize the network for generation:
+  debug("... specializing the network ...")
+  start_time = timeit.default_timer()
+  net.train(
+    examples,
+    lambda a: get_central_values(a, window_size, predict_size, palette_size),
+    sp_epochs,
+    sp_learning_rate
+  )
+  end_time = timeit.default_timer()
+  debug(
+    "... specialization finished in {} ...".format(
       str(datetime.timedelta(seconds=end_time - start_time))
     )
   )
@@ -517,7 +600,7 @@ def vis_network(
     outfile
   )
 
-def build_munge(examples, net, nbest=2):
+def build_ae_munge(examples, net, nbest=2):
   # Express our inputs in terms of the last layer of our neural net, and get
   # the values using the net in its current state:
   n_ex = examples.shape[0]
@@ -566,9 +649,24 @@ def build_munge(examples, net, nbest=2):
   #)
 
   return munge
-  
 
-def get_net(data=None, outdir="data", outfile="network.pkl.gz", rebuild=False):
+def build_munge(net, patch_size):
+  input = T.tensor3(name="input", dtype=theano.config.floatX)
+  predict = net.get_deconstruct(input.reshape([-1]))
+  result = predict.reshape([patch_size, patch_size, input.shape[2]])
+  return theano.function(
+    name="munge",
+    inputs=[input],
+    outputs=result
+  )
+
+def get_net(
+  data=None,
+  outdir="data",
+  outfile="network.pkl.gz",
+  center_size=2,
+  rebuild=False
+):
   fn = os.path.join(outdir, outfile)
   if not data:
     # Load data:
@@ -584,8 +682,9 @@ def get_net(data=None, outdir="data", outfile="network.pkl.gz", rebuild=False):
     # Build network:
     net = build_network(
       data["examples"],
-      window_size = ws,
-      palette_size = ps
+      window_size=ws,
+      predict_size=center_size,
+      palette_size=ps
     )
 
     debug("... pickling trained network ...")
@@ -596,8 +695,7 @@ def get_net(data=None, outdir="data", outfile="network.pkl.gz", rebuild=False):
     vis_network(
       net,
       r_palette,
-      window_size=ws,
-      outdir=outdir
+      window_size=ws
     )
   else:
     debug("... loading pickled network ...")
@@ -610,9 +708,11 @@ def get_net(data=None, outdir="data", outfile="network.pkl.gz", rebuild=False):
 def generate_image(
   outdir="out",
   outfile = "result.lvl.png",
-  size=(128,64),
-  cycles=1,
-  show_best_examples=False
+  #size=(128,64),
+  size=(32,32),
+  patch_size=2,
+  step_size=1,
+  cycles=1
 ):
   # Load data:
   data = load_data()
@@ -620,31 +720,43 @@ def generate_image(
   ws = data["window_size"]
   hws = int(ws/2)
   ps = len(data["palette"])
+  border = data["border"]
   r_palette = data["r_palette"]
 
-  net = get_net(data=data, rebuild=False)
+  net = get_net(data=data, center_size=patch_size, rebuild=False)
 
   # TODO: More realistic frequency distribution here?
   result = numpy.random.random_integers(
     0,
-    ps - 1,
-    (size[0], size[1])
+    ps - 2, # avoid the last entry, which is the border value
+    (size[0] + 2*ws, size[1] + 2*ws)
   )
+
+  # Set our border data to the border value:
+  for x in range(ws):
+    for y in range(size[1] + 2*ws):
+      result[x,y] = border
+  for x in range(size[0] + ws, size[1] + 2*ws):
+    for y in range(size[1] + 2*ws):
+      result[x,y] = border
+  for y in range(ws):
+    for x in range(size[0] + 2*ws):
+      result[x,y] = border
+  for y in range(size[1] + ws, size[1] + 2*ws):
+    for x in range(size[0] + 2*ws):
+      result[x,y] = border
 
   write_image(result, r_palette, outdir, "pre.lvl.png")
 
   result = explode_example(result, ps)
 
   indices = []
-  for x in range(0, size[0] - hws, hws):
-    for y in range(0, size[1] - hws, hws):
+  for x in range(ws - hws, size[0] + ws - hws, step_size):
+    for y in range(ws - hws, size[1] + ws - hws, step_size):
       indices.append((x, y))
-  #for x in range(0, size[0] - ws+1, ws):
-  #  for y in range(0, size[1] - ws+1, ws):
-  #    indices.append((x, y))
 
   debug("... starting image generation ...")
-  munge = build_munge(data["examples"], net)
+  munge = build_munge(net, patch_size)
 
   for epoch in range(cycles):
     numpy.random.shuffle(indices)
@@ -654,7 +766,7 @@ def generate_image(
         debug("... generating patch {}/{} ...".format(patch + 1, len(indices)))
       patch += 1
 
-      if epoch == 0 and patch == 6:
+      if epoch == 0 and patch == 20:
         write_image(
           implode_result(result),
           r_palette,
@@ -662,15 +774,11 @@ def generate_image(
           "patched.lvl.png"
         )
 
-      dots, result[x:x+ws,y:y+ws,:] = munge(result[x:x+ws,y:y+ws,:])
-      #dots, _ = munge(result[x:x+ws,y:y+ws,:])
-      #result[x:x+ws,y:y+ws,:] = result[x:x+ws,y:y+ws,:].reshape(-1).reshape((8, 8, 15))
-      if epoch == 0 and show_best_examples:
-        write_grayscale(
-          dots,
-          outdir=outdir,
-          outfile="dots-{}-{}.png".format(x, y)
-        )
+      result[
+        x + ws//2 - patch_size//2:x + ws//2 - patch_size//2 + patch_size,
+        y + ws//2 - patch_size//2:y + ws//2 - patch_size//2 + patch_size,
+        :
+      ] = munge(result[x:x+ws,y:y+ws,:])
 
     debug("... generation cycle {}/{} completed ...".format(epoch + 1, cycles))
 
@@ -679,14 +787,14 @@ def generate_image(
   write_image(result, r_palette, outdir, outfile)
   debug("... done.")
 
-def test_explode(filename="data/examples.pkl.gz"):
+def test_explode(filename="data/examples.pkl.gz", size=8):
   # Load the dataset
   with gzip.open(filename, 'rb') as fin:
     dataset = pickle.load(fin)
 
   ex = dataset["examples"][0]
   print(ex)
-  exr = ex.reshape(8, 8)
+  exr = ex.reshape(size, size)
   print(exr)
   expl = explode_example(exr, len(dataset["palette"]))
   print(expl)
@@ -694,11 +802,11 @@ def test_explode(filename="data/examples.pkl.gz"):
   print(impl)
 
   expl2 = explode_example(ex, len(dataset["palette"]))
-  impl2 = implode_result(expl2.reshape((8, 8, 15)))
+  impl2 = implode_result(expl2.reshape((size, size, 15)))
   print(impl2)
   print(impl2[7, 4], impl2[7, 5])
 
-  img = Image.new("RGB", (8, 8))
+  img = Image.new("RGB", (size, size))
   pixels = img.load()
 
   i = 0
@@ -714,4 +822,4 @@ def test_explode(filename="data/examples.pkl.gz"):
 
 if __name__ == "__main__":
   #test_explode()
-  generate_image()
+  generate_image(cycles=2)
