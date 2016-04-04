@@ -712,7 +712,8 @@ def generate_image(
   size=(32,32),
   patch_size=2,
   step_size=1,
-  cycles=1
+  cycles=1,
+  ini="distribution"
 ):
   # Load data:
   data = load_data()
@@ -722,21 +723,40 @@ def generate_image(
   ps = len(data["palette"])
   border = data["border"]
   r_palette = data["r_palette"]
+  fr_dist = data["fr_dist"]
+  exemplar = data["exemplar"]
 
   net = get_net(data=data, center_size=patch_size, rebuild=False)
 
-  # TODO: More realistic frequency distribution here?
-  result = numpy.random.random_integers(
-    0,
-    ps - 2, # avoid the last entry, which is the border value
-    (size[0] + 2*ws, size[1] + 2*ws)
-  )
+  if ini == "random":
+    result = numpy.random.random_integers(
+      0,
+      ps - 2, # avoid the last entry, which is the border value
+      (size[0] + 2*ws, size[1] + 2*ws)
+    )
+  elif ini == "shuffle":
+    result = numpy.zeros((size[0] + 2*ws, size[1] + 2*ws))
+    ex = exemplar.reshape(-1)
+    numpy.random.shuffle(ex)
+    ex = ex.reshape(exemplar.shape)[:size[0],:size[1]]
+    result[ws:size[0]+ws,ws:size[1]+ws] = ex
+  elif ini == "distribution":
+    result = numpy.zeros((size[0] + 2*ws, size[1] + 2*ws))
+    for x in range(ws, size[0] + ws):
+      for y in range(ws, size[1] + ws):
+        sofar = 0
+        choice = numpy.random.uniform(0, 1)
+        for w, v in fr_dist:
+          sofar += w
+          if sofar >= choice:
+            result[x, y] = v
+            break
 
   # Set our border data to the border value:
   for x in range(ws):
     for y in range(size[1] + 2*ws):
       result[x,y] = border
-  for x in range(size[0] + ws, size[1] + 2*ws):
+  for x in range(size[0] + ws, size[0] + 2*ws):
     for y in range(size[1] + 2*ws):
       result[x,y] = border
   for y in range(ws):
@@ -822,4 +842,5 @@ def test_explode(filename="data/examples.pkl.gz", size=8):
 
 if __name__ == "__main__":
   #test_explode()
-  generate_image(cycles=2)
+  #generate_image(cycles=1, ini="distribution")
+  generate_image(cycles=1, ini="shuffle")

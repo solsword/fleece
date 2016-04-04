@@ -20,6 +20,8 @@ import gzip
 import numpy
 import random
 
+from collections import defaultdict
+
 import theano
 
 from PIL import Image
@@ -35,6 +37,7 @@ def process_data(
 ):
   all_images = []
   dataset = []
+  fr_dict = defaultdict(lambda:0)
   border_index = -1
 
   # Collect all *.lvl.png images:
@@ -52,10 +55,25 @@ def process_data(
         palette[color] = index
         r_palette[index] = color
         index += 1
+      fr_dict[palette[color]] += count
   # Add a "border" out-of-band color (-1):
   palette[-1] = index
   r_palette[index] = (0xff, 0xff, 0x0e) # a quirky orange
   border_index = index
+
+  # compute frequency distribution
+  fr_dist = []
+  total_count = float(sum(fr_dict.values()))
+  for key in fr_dict:
+    fr_dist.append(((fr_dict[key] / total_count), key))
+
+  # Create the exemplar:
+  img = all_images[0]
+  pixels = img.load()
+  exemplar = numpy.zeros(img.size, dtype=theano.config.floatX)
+  for x in range(img.size[0]):
+    for y in range(img.size[1]):
+      exemplar[x, y] = palette[pixels[x, y]]
 
   # Iterate through all possible subregions of each image, turning each region
   # into a training example:
@@ -98,6 +116,8 @@ def process_data(
         "palette": palette,
         "r_palette": r_palette,
         "border": border_index,
+        "fr_dist": fr_dist,
+        "exemplar": exemplar,
       },
       fout
     )
